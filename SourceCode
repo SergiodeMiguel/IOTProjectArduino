@@ -1,0 +1,254 @@
+#include <Servo.h> //Includes servo library
+#include "WiFiS3.h"
+#include "arduino_secrets.h"
+#include "thingProperties.h"
+char ssid[] = SECRET_SSID;
+char pass[] = SECRET_OPTIONAL_PASS;
+int status = WL_IDLE_STATUS;
+// Digital pineage
+// pin2: entrance sensor
+// pin3: entrance servo
+// pin4: exit sensor
+// pin5: exit servo
+// pin6: park slot one sensor
+// pin7: park slot two sensor
+// pin8: park slot three sensor
+// etc
+
+// Global definitions
+const int maxParkingSlots = 10; // Define a maximum number of parking slots
+int parkingTotalSlots = 0; // Paking total slots
+const int entranceBarrierIrDPin = 2; // Entrance IR pin
+const int entranceBarrierServoDPin = 3; // Entrance servo
+const int exitBarrierIrDPin = 4; // Exit IR pin
+const int exitBarrierServoDPin = 5; // Exit servo
+const int firstSlotIrDPin = 6; // First digital ping representing first parking slot status
+
+const int barrierUp = 90;
+const int barrierDown = 0;
+
+int slotsStatus[maxParkingSlots]; // Boolean array representing availability status of parking slots
+int slotsDPin[maxParkingSlots]; // Int array representing DPin allocation of parking slots IR sensors
+
+int freeSlots; // Free parking slots calculated from parking slots Ir sensors
+
+Servo entranceBarrierServo;
+Servo exitBarrierServo;
+
+// Set barriers down at startup
+bool exitBarrierStatus = false;
+bool entranceBarrierStatus = false;
+
+
+// Indentify status of each slot
+void slotsStatusRead() {
+  for (int arrayPos = 0; arrayPos < parkingTotalSlots; arrayPos++) {
+    // Beware of automatic type casting of digitalRead output value to bool
+    slotsStatus[arrayPos] = digitalRead(slotsDPin[arrayPos]);
+    Serial.print (slotsStatus[arrayPos]);
+  }
+  Serial.println("");
+}
+
+// Calculates free parking slots
+int getFreeSlots(){
+  int partialSum = 0;
+  for (int arrayPos = 0; arrayPos < parkingTotalSlots; arrayPos++) {
+    // Beware of automatic type casting
+    partialSum = partialSum + slotsStatus[arrayPos];
+  }
+  Serial.print("Partial Sum: "); // Print label
+  Serial.println(partialSum); // Print the sum
+  partialSum = partialSum - reservedSlots;
+  return partialSum;
+  
+}
+
+void askUserParkingTotalSlots() {
+  // Asks the user to enter the total number of parking places
+  Serial.println("Enter the total number of parking slots:");
+
+  while (parkingTotalSlots <= 0 || parkingTotalSlots > maxParkingSlots) { // Infinite loop until a valid value is received
+    // Checks for data on the serial monitor
+    while (Serial.available() == 0) {
+      // Waits for user to enter a value
+    }
+    // Reads the number and converts it to an integer. If the user enters something that is not a number, parseInt() will return 0 as the value.
+    parkingTotalSlots = Serial.parseInt();
+  
+
+    // Verify if the input is valid
+    if (parkingTotalSlots <= 0 || parkingTotalSlots > maxParkingSlots) {
+      Serial.println("Please enter a valid number between 1 and " + String(maxParkingSlots) + ".");
+    }
+  }
+  Serial.println(parkingTotalSlots);
+}
+
+void setup() {
+  Serial.begin(9600);
+  // Defined in thingProperties.h
+  initProperties();
+
+  // Connect to Arduino IoT Cloud
+  ArduinoCloud.begin(ArduinoIoTPreferredConnection);
+  setDebugMessageLevel(2);
+  ArduinoCloud.printDebugInfo();
+  
+  wifiConnect();
+  Serial.print("You're connected to the network");
+  printCurrentNet();
+  printWifiData();
+
+  Serial.println(reservedSlots);
+  askUserParkingTotalSlots();
+
+  // Servo digital pin assignment  
+  entranceBarrierServo.attach (entranceBarrierServoDPin);
+  exitBarrierServo.attach (exitBarrierServoDPin);
+
+  // Lower servo barriers at startup
+  exitBarrierServo.write (barrierDown);
+  entranceBarrierServo.write (barrierDown);
+
+  // Initialize slotsDPin array
+  for (int arrayPos = 0; arrayPos < parkingTotalSlots; arrayPos++) {
+    slotsDPin[arrayPos] = firstSlotIrDPin + arrayPos;
+  }
+
+  // Configure sensors digital pins for input
+  pinMode(entranceBarrierIrDPin, INPUT);
+  pinMode(exitBarrierIrDPin, INPUT);
+  for (int arrayPos = 0; arrayPos < parkingTotalSlots; arrayPos++) {
+    pinMode(slotsDPin[arrayPos], INPUT); // Set pin mode for each parking slot
+  }
+
+  Serial.println("Comienza el loop");
+  delay(1000);
+}
+
+void loop(){
+  ArduinoCloud.update();
+  Serial.print("Reserved Slots: ");
+  Serial.println(reservedSlots);
+  slotsStatusRead();
+  freeSlots = getFreeSlots();
+  Serial.print("Slots libres: ");
+  Serial.println(freeSlots);
+  Serial.print("Barrera Salida: ");
+  Serial.println(exitBarrierStatus);
+  Serial.print("Barrera Entrada: ");
+  Serial.println(entranceBarrierStatus);
+
+
+  // Rise barriers
+  // LOW means exitBarrierIrDPin detects object
+  if(exitBarrierStatus == false && digitalRead (exitBarrierIrDPin) == LOW){
+    Serial.println("sensor salida activado");
+    exitBarrierServo.write (barrierUp);
+    Serial.println("barrera salida levantada");
+    exitBarrierStatus = true;
+  }
+  // LOW means entranceBarrierIrDPin detects object
+  if(entranceBarrierStatus == false && digitalRead (entranceBarrierIrDPin) == LOW && freeSlots > 0) {
+    Serial.println("sensor entrada activado");
+    entranceBarrierServo.write (barrierUp);
+    Serial.println("barrera entrada levantada");
+    entranceBarrierStatus = true;
+  }
+  // Lower barriers
+  if (entranceBarrierStatus == true && digitalRead(entranceBarrierIrDPin) == HIGH){
+    entranceBarrierServo.write (barrierDown);
+    Serial.println("barrera entrada bajada");
+    entranceBarrierStatus = false;
+  }
+  // Beware if both barriers rise at the same moment, exit barrier will have to wait
+  if (exitBarrierStatus == true && digitalRead(exitBarrierIrDPin) == HIGH){
+    exitBarrierServo.write (barrierDown);
+    Serial.println("barrera salida bajada");
+    exitBarrierStatus = false;
+  }
+  Serial.println("Final loop");
+
+}
+
+// Wifi configuration
+void wifiConnect(){
+  // Wifi configuration
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println("Communication with WiFi module failed!");
+    // don't continue
+    while (true);
+  }
+
+  String fv = WiFi.firmwareVersion();
+  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
+    Serial.println("Please upgrade the firmware");
+  }
+
+  while (status != WL_CONNECTED) {
+    Serial.print("Attempting to connect to WPA SSID: ");
+    Serial.println(ssid);
+    // Connect to WPA/WPA2 network:
+    status = WiFi.begin(ssid, pass);
+
+    delay(10000);
+  }
+}
+
+void printWifiData() {
+  // print your board's IP address:
+  IPAddress ip = WiFi.localIP();
+  Serial.print("IP Address: ");
+  
+  Serial.println(ip);
+
+  // print your MAC address:
+  byte mac[6];
+  WiFi.macAddress(mac);
+  Serial.print("MAC address: ");
+  printMacAddress(mac);
+}
+
+void printCurrentNet() {
+  // print the SSID of the network you're attached to:
+  Serial.print("SSID: ");
+  Serial.println(WiFi.SSID());
+   // print the MAC address of the router you're attached to:
+  byte bssid[6];
+  WiFi.BSSID(bssid);
+  Serial.print("BSSID: ");
+  printMacAddress(bssid);
+
+  // print the received signal strength:
+  long rssi = WiFi.RSSI();
+  Serial.print("signal strength (RSSI):");
+  Serial.println(rssi);
+
+  // print the encryption type:
+  byte encryption = WiFi.encryptionType();
+  Serial.print("Encryption Type:");
+  Serial.println(encryption, HEX);
+  Serial.println();
+}
+
+void printMacAddress(byte mac[]) {
+  for (int i = 0; i < 6; i++) {
+    if (i > 0) {
+      Serial.print(":");
+    }
+    if (mac[i] < 16) {
+      Serial.print("0");
+    }
+    Serial.print(mac[i], HEX);
+  }
+  Serial.println();
+}
+
+/*
+  Since ReservedSlots is READ_WRITE variable, onReservedSlotsChange() is
+  executed every time a new value is received from IoT Cloud.
+*/
+void onReservedSlotsChange()  {
+  // Add your code here to act upon ReservedSlots change
+}
